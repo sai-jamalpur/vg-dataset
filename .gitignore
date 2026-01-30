@@ -1,4 +1,8 @@
-.env
+# General
+.DS_Store
+Thumbs.db
+
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -16,24 +20,50 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
+
+# Unit test / coverage
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
 .hypothesis/
+.nox/
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+cover/
+
+# Logs
+*.log
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Project Specific
 data/temp/*
 data/processed/*
 data/state/*
 video_scraper/logs/*
-*.log
-.DS_Store
-Thumbs.db
 
 # User requested additions
 *.mp4
 temp/
 data/
+
+# IDE
+.vscode/
+.idea/
