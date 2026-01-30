@@ -2,7 +2,7 @@ import re
 import time
 import random
 from typing import List, Optional, Set, Any, Dict
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from urllib.parse import urlparse
 from video_scraper.config import USER_AGENTS, SEARCH_DELAY_MIN, SEARCH_DELAY_MAX, MAX_RETRIES, SEARCH_FETCH_LIMIT
 from video_scraper.utils import logger
