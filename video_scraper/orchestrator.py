@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 import time
 import concurrent.futures
 from datetime import datetime, timedelta
@@ -15,7 +15,7 @@ from video_scraper.config import PROCESSED_DIR, MAX_VIDEO_DURATION_SECONDS
 
 
 class VideoScraperOrchestrator:
-    def __init__(self, json_path: str | Path):
+    def __init__(self, json_path: Union[str, Path]):
         self.json_parser = JSONParser(json_path)
         self.db_manager = LocalStorageManager()
         self.state_manager = StateManager()

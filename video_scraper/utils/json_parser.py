@@ -1,11 +1,11 @@
 import json
 from pathlib import Path
-from typing import Dict, List, Any, Iterator
+from typing import Dict, List, Any, Iterator, Union
 from video_scraper.utils import logger
 
 
 class JSONParser:
-    def __init__(self, json_path: str | Path):
+    def __init__(self, json_path: Union[str, Path]):
         self.json_path = Path(json_path)
         if not self.json_path.exists():
             raise FileNotFoundError(f"JSON file not found: {self.json_path}")

@@ -1,9 +1,11 @@
 import yt_dlp
 import time
 import random
+import concurrent.futures
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from video_scraper.config import (
+    BASE_DIR,
     TEMP_DIR,
     MAX_VIDEO_DURATION_SECONDS,
     USER_AGENTS,
@@ -13,63 +15,98 @@ from video_scraper.config import (
     BACKOFF_BASE_DELAY,
     BACKOFF_MAX_DELAY,
     BACKOFF_FACTOR,
+    MAX_CONCURRENT_DOWNLOADS
 )
 from video_scraper.utils import logger
-
 
 class VideoDownloader:
     def __init__(self):
         self.temp_dir = TEMP_DIR
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.session_user_agent = random.choice(USER_AGENTS)
+        
+        # Define cookie path based on user input
+        self.cookie_file = BASE_DIR / "www.youtube.com_cookies.txt"
+        
+        if self.cookie_file.exists():
+            logger.info(f"🍪 Cookie file found and loaded: {self.cookie_file.name}")
+        else:
+            logger.warning(f"⚠️ Cookie file not found at {self.cookie_file}. Continuing without authentication.")
 
-    def download_with_info(self, url: str) -> Optional[Dict[str, Any]]:
-        try:
-            info = self._get_video_info(url)
-            if not info:
-                logger.warning(f"Could not get video info for: {url}")
-                return None
-            path = self.download_video(url)
-            if not path:
-                return None
-            return {"path": path, "info": info}
-        except Exception as e:
-            logger.error(f"Error in download_with_info for {url}: {e}")
-            return None
+    def _get_ydl_options(self, output_path: str = None) -> Dict[str, Any]:
+        """
+        Returns optimized yt-dlp options with 'Get Anything' Fallback.
+        """
+        opts = {
+            # --- 1. The "Get Anything" Cascade Strategy ---
+            "format": ( 
+                # Tier 1: The "Perfect" File (Small, MP4)
+                "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/"  
+                
+                # Tier 2: The "Good" File (Small, Any Container like WebM)
+                "bestvideo[height<=480]+bestaudio/"                    
+                
+                # Tier 3: The "Acceptable" File (720p or lower, Any Container)
+                "bestvideo[height<=720]+bestaudio/"   
 
-    def _get_ydl_options(self, output_path: str) -> Dict[str, Any]:
-        return {
-            "format": "best[ext=mp4]/best",
-            "outtmpl": output_path,
+                # Tier 4: The "Single File" Fallback (Sometimes video/audio aren't separate)
+                "best[height<=720]/"
+
+                # Tier 5: The "Panic Button" - Download literally anything available
+                "best"                                                 
+            ),
+            
+            # --- 2. Authentication (Cookies) ---
+            "cookiefile": str(self.cookie_file) if self.cookie_file.exists() else None,
+
+            # --- 3. Stealth & Headers ---
             "quiet": True,
             "no_warnings": True,
-            "ignoreerrors": False,
-            "nocheckcertificate": True,
-            "user_agent": random.choice(USER_AGENTS),
+            "extractor_args": {'youtube': {'player_client': ['android', 'web']}}, 
             "http_headers": {
-                "User-Agent": random.choice(USER_AGENTS),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-                "Accept-Encoding": "gzip, deflate",
-                "DNT": "1",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
+                "User-Agent": self.session_user_agent,
+                "Accept-Language": "en-US,en;q=0.9",
             },
+            
+            # --- 4. Filters ---
+            "match_filter": self._filter_shorts_and_duration,
+
+            # --- 5. Reliability ---
+            "nocheckcertificate": False, 
+            "ignoreerrors": True,
             "retries": MAX_RETRIES,
             "fragment_retries": MAX_RETRIES,
-            "extractor_retries": MAX_RETRIES,
-            "file_access_retries": MAX_RETRIES,
-            "sleep_interval": random.uniform(DOWNLOAD_DELAY_MIN, DOWNLOAD_DELAY_MAX),
-            "max_sleep_interval": DOWNLOAD_DELAY_MAX,
+            
+            # --- 6. Output ---
+            "outtmpl": output_path if output_path else str(self.temp_dir / "%(id)s.%(ext)s"),
         }
+        return opts
+
+    def _filter_shorts_and_duration(self, info_dict, *, incomplete=False):
+        """
+        Custom filter to reject Shorts and long videos.
+        """
+        duration = info_dict.get('duration')
+        if duration and duration > MAX_VIDEO_DURATION_SECONDS:
+            return f"Video too long: {duration}s"
+        
+        width = info_dict.get('width')
+        height = info_dict.get('height')
+        url = info_dict.get('webpage_url', '')
+
+        if '/shorts/' in url:
+            return "Rejected: Detected as YouTube Short URL"
+        
+        if width and height and height > width:
+            return "Rejected: Vertical video aspect ratio (likely a Short)"
+            
+        return None
 
     def _get_video_info(self, url: str) -> Optional[Dict[str, Any]]:
         try:
-            ydl_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "skip_download": True,
-                "user_agent": random.choice(USER_AGENTS),
-            }
+            ydl_opts = self._get_ydl_options()
+            ydl_opts.update({"skip_download": True})
+            
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 return info
@@ -77,110 +114,124 @@ class VideoDownloader:
             logger.error(f"Error getting video info for {url}: {e}")
             return None
 
-    def _is_duration_valid(self, duration: Optional[int]) -> bool:
-        if duration is None:
-            return True
-        return duration <= MAX_VIDEO_DURATION_SECONDS
+    def download_with_info(self, url: str) -> Optional[Dict[str, Any]]:
+        """
+        Downloads video and returns dict with path and info.
+        Compatible with Orchestrator expectations.
+        """
+        try:
+            # 1. Get info first
+            info = self._get_video_info(url)
+            if not info:
+                return None
+            
+            # 2. Download using the info
+            path = self.download_video(url, pre_fetched_info=info)
+            if not path:
+                return None
+                
+            return {
+                "path": path,
+                "info": info
+            }
+        except Exception as e:
+            logger.error(f"Error in download_with_info for {url}: {e}")
+            return None
 
     def download_video(
         self,
         url: str,
         filename: Optional[str] = None,
+        pre_fetched_info: Optional[Dict[str, Any]] = None
     ) -> Optional[Path]:
         try:
-            logger.info(f"Checking video info for: {url}")
-            video_info = self._get_video_info(url)
+            # Use pre-fetched info if available to save a request
+            video_info = pre_fetched_info
+            if not video_info:
+                video_info = self._get_video_info(url)
             
             if not video_info:
-                logger.warning(f"Could not get video info for: {url}")
                 return None
 
-            duration = video_info.get("duration")
-            if not self._is_duration_valid(duration):
-                logger.warning(
-                    f"Video duration {duration}s exceeds limit {MAX_VIDEO_DURATION_SECONDS}s: {url}"
-                )
-                return None
-
+            video_id = video_info.get("id", "unknown")
+            
             if filename is None:
-                video_id = video_info.get("id", "unknown")
                 filename = f"{video_id}.mp4"
-
             output_path = self.temp_dir / filename
-            output_template = str(self.temp_dir / "%(id)s.%(ext)s")
+            output_template = str(self.temp_dir / f"{video_id}.%(ext)s")
 
-            logger.info(f"Downloading video: {url} -> {output_path}")
+            if output_path.exists() and output_path.stat().st_size > 0:
+                logger.info(f"Skipping download, file exists: {output_path}")
+                return output_path
+
+            logger.info(f"Downloading (Flexible Format): {url} -> {output_path}")
             
             ydl_opts = self._get_ydl_options(output_template)
             
-            # Retry loop with exponential backoff
             attempts = 0
             while attempts <= MAX_RETRIES:
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         ydl.download([url])
-                    break # Success
+                    break 
                 except Exception as e:
                     attempts += 1
-                    is_blocked = "429" in str(e) or "Too Many Requests" in str(e) or "HTTP Error 429" in str(e)
+                    error_str = str(e).lower()
                     
-                    if attempts > MAX_RETRIES:
-                        logger.error(f"Max retries reached for {url}: {e}")
-                        return None
-
-                    if is_blocked:
+                    if "429" in error_str or "too many requests" in error_str:
                         delay = min(BACKOFF_MAX_DELAY, BACKOFF_BASE_DELAY * (BACKOFF_FACTOR ** attempts))
-                        logger.warning(f"Blocked by YouTube (HTTP 429). Retrying in {delay}s... (Attempt {attempts}/{MAX_RETRIES})")
+                        logger.warning(f"🛑 Rate Limited (429). Cooling down for {delay}s...")
                         time.sleep(delay)
+                    elif "sign in" in error_str:
+                        logger.error("🛑 Authentication failed! Check your cookies.txt file expiration.")
+                        return None
+                    elif "unavailable" in error_str or "private" in error_str:
+                        logger.warning(f"Video unavailable: {url}")
+                        return None
                     else:
                         delay = random.uniform(DOWNLOAD_DELAY_MIN, DOWNLOAD_DELAY_MAX)
-                        logger.warning(f"Download error: {e}. Retrying in {delay}s... (Attempt {attempts}/{MAX_RETRIES})")
+                        logger.warning(f"Retry ({attempts}): {e}")
                         time.sleep(delay)
 
-            # Check for downloaded file
-            # 1. Check exact filename if provided/constructed
-            if output_path.exists() and output_path.stat().st_size > 0:
-                final_path = output_path
+            # Robust file finder: Look for ANY extension
+            candidates = list(self.temp_dir.glob(f"{video_id}.*"))
+            # Filter out non-video files just in case (like .json or .part)
+            valid_candidates = [
+                p for p in candidates 
+                if p.stat().st_size > 0 and p.suffix.lower() in ['.mp4', '.webm', '.mkv', '.flv', '.avi', '.mov']
+            ]
+            
+            if valid_candidates:
+                # Mimic human "watching" time
+                time.sleep(random.uniform(DOWNLOAD_DELAY_MIN, DOWNLOAD_DELAY_MAX))
+                return valid_candidates[0]
             else:
-                # 2. Check via glob using video ID
-                video_id = video_info.get('id')
-                candidates = list(self.temp_dir.glob(f"{video_id}.*"))
-                valid_candidates = [p for p in candidates if p.stat().st_size > 0]
-                
-                if valid_candidates:
-                    final_path = valid_candidates[0]
-                else:
-                    logger.error(f"Download completed but file not found or empty: {url}")
-                    return None
-
-            logger.info(f"Successfully downloaded: {final_path}")
-            
-            delay = random.uniform(DOWNLOAD_DELAY_MIN, DOWNLOAD_DELAY_MAX)
-            time.sleep(delay)
-            
-            return final_path
+                return None
 
         except Exception as e:
-            logger.error(f"Error downloading video {url}: {e}")
+            logger.error(f"Critical error downloading {url}: {e}")
             return None
 
-    def download_videos(
+    def download_videos_parallel(
         self,
-        urls: list[str],
+        urls: List[str],
         max_videos: Optional[int] = None,
-    ) -> list[Path]:
+        max_workers: int = MAX_CONCURRENT_DOWNLOADS
+    ) -> List[Path]:
+        if max_videos:
+            urls = urls[:max_videos]
+
         downloaded_files = []
+        logger.info(f"Starting parallel download of {len(urls)} videos using Cookies...")
         
-        for i, url in enumerate(urls):
-            if max_videos and len(downloaded_files) >= max_videos:
-                logger.info(f"Reached maximum download limit: {max_videos}")
-                break
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_url = {executor.submit(self.download_video, url): url for url in urls}
             
-            file_path = self.download_video(url)
-            if file_path:
-                downloaded_files.append(file_path)
-        
-        logger.info(f"Successfully downloaded {len(downloaded_files)}/{len(urls)} videos")
+            for future in concurrent.futures.as_completed(future_to_url):
+                path = future.result()
+                if path:
+                    downloaded_files.append(path)
+
         return downloaded_files
 
     def cleanup_temp_files(self):
@@ -189,6 +240,5 @@ class VideoDownloader:
             for file in files:
                 if file.is_file():
                     file.unlink()
-            logger.info(f"Cleaned up {len(files)} temporary files")
         except Exception as e:
             logger.error(f"Error cleaning up temp files: {e}")
