@@ -5,7 +5,7 @@ import concurrent.futures
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from video_scraper.config import (
-    BASE_DIR,  # Ensure this is imported from your config
+    BASE_DIR,
     TEMP_DIR,
     MAX_VIDEO_DURATION_SECONDS,
     USER_AGENTS,
@@ -35,14 +35,28 @@ class VideoDownloader:
 
     def _get_ydl_options(self, output_path: str = None) -> Dict[str, Any]:
         """
-        Returns optimized yt-dlp options with Cookie support.
+        Returns optimized yt-dlp options with 'Get Anything' Fallback.
         """
         opts = {
-            # --- 1. Resolution & Format (360p) ---
-            "format": "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]",
+            # --- 1. The "Get Anything" Cascade Strategy ---
+            "format": ( 
+                # Tier 1: The "Perfect" File (Small, MP4)
+                "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/"  
+                
+                # Tier 2: The "Good" File (Small, Any Container like WebM)
+                "bestvideo[height<=480]+bestaudio/"                    
+                
+                # Tier 3: The "Acceptable" File (720p or lower, Any Container)
+                "bestvideo[height<=720]+bestaudio/"   
+
+                # Tier 4: The "Single File" Fallback (Sometimes video/audio aren't separate)
+                "best[height<=720]/"
+
+                # Tier 5: The "Panic Button" - Download literally anything available
+                "best"                                                 
+            ),
             
             # --- 2. Authentication (Cookies) ---
-            # This is the key line that uses your file
             "cookiefile": str(self.cookie_file) if self.cookie_file.exists() else None,
 
             # --- 3. Stealth & Headers ---
@@ -58,7 +72,7 @@ class VideoDownloader:
             "match_filter": self._filter_shorts_and_duration,
 
             # --- 5. Reliability ---
-            "nocheckcertificate": False,
+            "nocheckcertificate": False, 
             "ignoreerrors": True,
             "retries": MAX_RETRIES,
             "fragment_retries": MAX_RETRIES,
@@ -134,7 +148,6 @@ class VideoDownloader:
             # Use pre-fetched info if available to save a request
             video_info = pre_fetched_info
             if not video_info:
-                # logger.info(f"Fetching metadata for: {url}") # Reduced log noise
                 video_info = self._get_video_info(url)
             
             if not video_info:
@@ -151,7 +164,7 @@ class VideoDownloader:
                 logger.info(f"Skipping download, file exists: {output_path}")
                 return output_path
 
-            logger.info(f"Downloading (360p): {url} -> {output_path}")
+            logger.info(f"Downloading (Flexible Format): {url} -> {output_path}")
             
             ydl_opts = self._get_ydl_options(output_template)
             
@@ -180,10 +193,16 @@ class VideoDownloader:
                         logger.warning(f"Retry ({attempts}): {e}")
                         time.sleep(delay)
 
+            # Robust file finder: Look for ANY extension
             candidates = list(self.temp_dir.glob(f"{video_id}.*"))
-            valid_candidates = [p for p in candidates if p.stat().st_size > 0]
+            # Filter out non-video files just in case (like .json or .part)
+            valid_candidates = [
+                p for p in candidates 
+                if p.stat().st_size > 0 and p.suffix.lower() in ['.mp4', '.webm', '.mkv', '.flv', '.avi', '.mov']
+            ]
             
             if valid_candidates:
+                # Mimic human "watching" time
                 time.sleep(random.uniform(DOWNLOAD_DELAY_MIN, DOWNLOAD_DELAY_MAX))
                 return valid_candidates[0]
             else:
